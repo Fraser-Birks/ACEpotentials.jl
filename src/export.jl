@@ -5,8 +5,9 @@ import Interpolations
 using JuLIP: energy, bulk, i2z, z2i, chemical_symbol, SMatrix
 using OrderedCollections
 using YAML
+export _basis_groups
 
-function export2lammps(fname, IP; only_mb_basis = false)
+function export2lammps(fname, IP; only_mb_basis = false, exclude_ranks = [])
 
     if !(fname[end-4:end] == ".yace")
         throw(ArgumentError("Potential name must be supplied with .yace extension"))
@@ -123,7 +124,7 @@ function export2lammps(fname, IP; only_mb_basis = false)
         data["bonds"][[iz1-1,iz2-1]]["splinenodalderivs"] = nodalderivs_map
     end
 
-    functions, lmax = export_ACE_functions(V3, species, reversed_species_dict)
+    functions, lmax = export_ACE_functions(V3, species, reversed_species_dict, exclude_ranks=exclude_ranks)
     data["functions"] = functions
     data["lmax"] = lmax
 
@@ -233,7 +234,7 @@ function write_pairpot_table(fname, V2, species_dict)
     return nothing
 end
 
-function export_ACE_functions(V3, species, reversed_species_dict)
+function export_ACE_functions(V3, species, reversed_species_dict;exclude_ranks=[])
     functions = Dict()
     lmax = 0
 
@@ -246,6 +247,10 @@ function export_ACE_functions(V3, species, reversed_species_dict)
         for group in groups
             for (m, c) in zip(group["M"], group["C"])
                 c_ace = c / (4*π)^(group["ord"]/2)
+                ind_arr = findall(x -> x == group["ord"], exclude_ranks)
+                if length(ind_arr)>0
+                    c_ace = 0.0*c_ace
+                end
                 #@show length(c_ace)
                 ndensity = 1
                 push!(sel_bgroups, Dict("rank" => group["ord"],

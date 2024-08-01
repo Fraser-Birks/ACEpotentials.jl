@@ -3,6 +3,7 @@ import JuLIP: Atoms, energy, forces, mat
 using PrettyTables
 using OrderedCollections
 using StaticArrays: SVector
+using StatsBase
 
 export AtomsData, 
        print_rmse_table, print_mae_table, print_errors_tables
@@ -12,19 +13,22 @@ struct AtomsData <: ACEfit.AbstractData
     energy_key::Union{String, Nothing}
     force_key::Union{String, Nothing}
     virial_key::Union{String, Nothing}
+    pae_key::Union{String, Nothing}
+    mask_key::Union{String, Nothing}
     weights
     energy_ref
     function AtomsData(atoms::Atoms;
                        energy_key=nothing,
                        force_key=nothing,
                        virial_key=nothing,
+                       pae_key=nothing,
+                       mask_key=nothing,
                        weights=Dict("default"=>Dict("E"=>1.0, "F"=>1.0, "V"=>1.0)),
                        v_ref=nothing, 
                        weight_key="config_type")
-
         # set energy, force, and virial keys for this configuration
         # ("nothing" indicates data that are absent or ignored)
-        ek, fk, vk = nothing, nothing, nothing
+        ek, fk, vk, paek, mk = nothing, nothing, nothing, nothing, nothing
         if !isnothing(energy_key)
             for key in keys(atoms.data)
                 (lowercase(energy_key)==lowercase(key)) && (ek=key)
@@ -38,6 +42,16 @@ struct AtomsData <: ACEfit.AbstractData
         if !isnothing(virial_key)
             for key in keys(atoms.data)
                 (lowercase(virial_key)==lowercase(key)) && (vk=key)
+            end
+        end
+        if !isnothing(pae_key)
+            for key in keys(atoms.data)
+                (lowercase(pae_key)==lowercase(key)) && (paek=key)
+            end
+        end
+        if !isnothing(mask_key)
+            for key in keys(atoms.data)
+                (lowercase(mask_key)==lowercase(key)) && (mk=key)
             end
         end
 
@@ -59,19 +73,38 @@ struct AtomsData <: ACEfit.AbstractData
             e_ref = energy(v_ref, atoms)
         end
 
-        return new(atoms, ek, fk, vk, w, e_ref)
+        return new(atoms, ek, fk, vk, paek, mk, w, e_ref)
     end
 end
 
+function _get_mask(d::AtomsData;force_mask=false)
+    if isnothing(d.mask_key)
+        mask = !=(0).(ones(length(d.atoms)))
+    else
+        mask = !=(0).(d.atoms.data[d.mask_key].data)
+    end
+    if force_mask
+        mask = inverse_rle(mask,3 .*ones(Int, length(mask)))
+    end
+    return mask
+end
+
 function ACEfit.count_observations(d::AtomsData)
-    return !isnothing(d.energy_key) +
-           3*length(d.atoms)*!isnothing(d.force_key) +
-           6*!isnothing(d.virial_key)
+    pae_mask = _get_mask(d)
+    force_mask = _get_mask(d,force_mask=true)
+    count = !isnothing(d.energy_key) +
+        sum(force_mask)*!isnothing(d.force_key) +
+        6*!isnothing(d.virial_key) + 
+        sum(pae_mask)*!isnothing(d.pae_key)
+    println(count)
+    return count
 end
 
 function ACEfit.feature_matrix(d::AtomsData, basis; kwargs...)
     dm = Array{Float64}(undef, ACEfit.count_observations(d), length(basis))
     i = 1
+    pae_mask = _get_mask(d)
+    force_mask = _get_mask(d,force_mask=true)
     if !isnothing(d.energy_key)
         dm[i,:] .= energy(basis, d.atoms)
         i += 1
@@ -79,9 +112,9 @@ function ACEfit.feature_matrix(d::AtomsData, basis; kwargs...)
     if !isnothing(d.force_key)
         f = mat.(forces(basis, d.atoms))
         for j in 1:length(basis)
-            dm[i:i+3*length(d.atoms)-1,j] .= f[j][:]
+            dm[i:i+sum(force_mask)-1,j] .= f[j][force_mask]
         end
-        i += 3*length(d.atoms)
+        i += sum(force_mask)
     end
     if !isnothing(d.virial_key)
         v = virial(basis, d.atoms)
@@ -90,12 +123,29 @@ function ACEfit.feature_matrix(d::AtomsData, basis; kwargs...)
         end
         i += 6
     end
+    if !isnothing(d.pae_key)
+        #E = energy(basis, d.atoms)
+        pae = hcat([site_energy(basis, d.atoms, i) for i in 1:length(d.atoms)]...)
+        #test = dropdims(sum(pae,dims=2),dims=2)
+        #println(E-test)
+        #exit()
+        #println(size(pae))
+        pae = [pae[iB, :] for iB = 1:length(basis)]
+        #println(size(pae))
+        #println(pae[1][:])
+        for j in 1:length(basis)
+            dm[i:i+sum(pae_mask)-1,j] .= pae[j][pae_mask]
+        end
+        i += sum(pae_mask)
+    end
     return dm
 end
 
 function ACEfit.target_vector(d::AtomsData; kwargs...)
     y = Array{Float64}(undef, ACEfit.count_observations(d))
     i = 1
+    pae_mask = _get_mask(d)
+    force_mask = _get_mask(d,force_mask=true)
     if !isnothing(d.energy_key)
         e = d.atoms.data[d.energy_key].data
         y[i] = e - d.energy_ref
@@ -103,8 +153,8 @@ function ACEfit.target_vector(d::AtomsData; kwargs...)
     end
     if !isnothing(d.force_key)
         f = mat(d.atoms.data[d.force_key].data)
-        y[i:i+3*length(d.atoms)-1] .= f[:]
-        i += 3*length(d.atoms)
+        y[i:i+sum(force_mask)-1] .= f[force_mask]
+        i += sum(force_mask)
     end
     if !isnothing(d.virial_key)
         # the following hack is necessary for 3-atom cells:
@@ -114,23 +164,35 @@ function ACEfit.target_vector(d::AtomsData; kwargs...)
         y[i:i+5] .= v[SVector(1,5,9,6,3,2)]
         i += 6
     end
+    if !isnothing(d.pae_key)
+        #println(d.atoms.data[d.pae_key].data[pae_mask] .- (d.energy_ref/length(d.atoms)))
+        #exit()
+        y[i:i+sum(pae_mask)-1] .= d.atoms.data[d.pae_key].data[pae_mask] .- (d.energy_ref/length(d.atoms))
+        i += sum(pae_mask)
+    end
     return y
 end
 
 function ACEfit.weight_vector(d::AtomsData; kwargs...)
     w = Array{Float64}(undef, ACEfit.count_observations(d))
     i = 1
+    pae_mask = _get_mask(d)
+    force_mask = _get_mask(d,force_mask=true)
     if !isnothing(d.energy_key)
         w[i] = d.weights["E"] / sqrt(length(d.atoms))
         i += 1
     end
     if !isnothing(d.force_key)
-        w[i:i+3*length(d.atoms)-1] .= d.weights["F"]
-        i += 3*length(d.atoms)
+        w[i:i+sum(force_mask)-1] .= d.weights["F"]
+        i += sum(force_mask)
     end
     if !isnothing(d.virial_key)
         w[i:i+5] .= d.weights["V"] / sqrt(length(d.atoms))
         i += 6
+    end
+    if !isnothing(d.pae_key)
+        w[i:i+sum(pae_mask)-1] .= 1.0
+        i += sum(pae_mask)
     end
     return w
 end
@@ -138,7 +200,7 @@ end
 function recompute_weights(raw_data;
                            energy_key=nothing, force_key=nothing, virial_key=nothing,
                            weights=Dict("default"=>Dict("E"=>1.0, "F"=>1.0, "V"=>1.0)))
-    data = [ AtomsData(at; energy_key = energy_key, force_key=force_key,
+    data = [ AtomsData(at; energy_key = energy_key, force_key=force_key, pae_key=pae_key, mask_key=mask_key,
                    virial_key = virial_key, weights = weights) for at in raw_data ]
     return ACEfit.assemble_weights(data)
 end
@@ -155,9 +217,9 @@ end
 
 function linear_errors(data::AbstractArray{AtomsData}, model; group_key="config_type", verbose=true)
 
-   mae = Dict("E"=>0.0, "F"=>0.0, "V"=>0.0)
-   rmse = Dict("E"=>0.0, "F"=>0.0, "V"=>0.0)
-   num = Dict("E"=>0, "F"=>0, "V"=>0)
+   mae = Dict("E"=>0.0, "F"=>0.0, "V"=>0.0, "PAE"=>0.0)
+   rmse = Dict("E"=>0.0, "F"=>0.0, "V"=>0.0, "PAE"=>0.0)
+   num = Dict("E"=>0, "F"=>0, "V"=>0, "PAE"=>0)
 
    config_types = []
    config_mae = Dict{String,Any}()
@@ -169,9 +231,9 @@ function linear_errors(data::AbstractArray{AtomsData}, model; group_key="config_
        c_t = group_type(d; group_key)
        if !(c_t in config_types)
           push!(config_types, c_t)
-          merge!(config_rmse, Dict(c_t=>Dict("E"=>0.0, "F"=>0.0, "V"=>0.0)))
-          merge!(config_mae, Dict(c_t=>Dict("E"=>0.0, "F"=>0.0, "V"=>0.0)))
-          merge!(config_num, Dict(c_t=>Dict("E"=>0, "F"=>0, "V"=>0)))
+          merge!(config_rmse, Dict(c_t=>Dict("E"=>0.0, "F"=>0.0, "V"=>0.0, "PAE"=>0.0)))
+          merge!(config_mae, Dict(c_t=>Dict("E"=>0.0, "F"=>0.0, "V"=>0.0, "PAE"=>0.0)))
+          merge!(config_num, Dict(c_t=>Dict("E"=>0, "F"=>0, "V"=>0, "PAE"=>0)))
        end
 
        # energy errors
@@ -212,6 +274,18 @@ function linear_errors(data::AbstractArray{AtomsData}, model; group_key="config_
            config_rmse[c_t]["V"] += sum((estim-exact).^2)
            config_num[c_t]["V"] += 6
        end
+
+       # pae errors
+       if !isnothing(d.pae_key)
+           estim = [site_energy(model, d.atoms, i) for i in 1:length(d.atoms)]
+           exact = d.atoms.data[d.pae_key].data
+           mae["PAE"] += sum(abs.(estim-exact))
+           rmse["PAE"] += sum((estim-exact).^2)
+           num["PAE"] += length(d.atoms)
+           config_mae[c_t]["PAE"] += sum(abs.(estim-exact))
+           config_rmse[c_t]["PAE"] += sum((estim-exact).^2)
+           config_num[c_t]["PAE"] += length(d.atoms)
+       end
     end
 
     # finalize errors
@@ -251,7 +325,7 @@ function print_errors_tables(config_errors::Dict)
 end
 
 function _print_err_tbl(D::Dict)
-    header = ["Type", "E [meV]", "F [eV/A]", "V [meV]"]
+    header = ["Type", "E [meV]", "F [eV/A]", "V [meV]", "PAE [meV]"]
     config_types = setdiff(collect(keys(D)), ["set",])
     push!(config_types, "set")
     table = hcat(
@@ -259,6 +333,7 @@ function _print_err_tbl(D::Dict)
         [1000*D[c_t]["E"] for c_t in config_types],
         [D[c_t]["F"] for c_t in config_types],
         [1000*D[c_t]["V"] for c_t in config_types],
+        [1000*D[c_t]["PAE"] for c_t in config_types]
     )
     pretty_table(
         table; header=header,

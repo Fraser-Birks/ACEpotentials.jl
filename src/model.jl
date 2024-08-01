@@ -51,7 +51,9 @@ function acefit!(model::ACE1Model, raw_data;
                 weights = default_weights(),
                 energy_key = "energy", 
                 force_key = "force", 
-                virial_key = "virial", 
+                virial_key = "virial",
+                pae_key=nothing,
+                mask_key = nothing,
                 smoothness = 4, 
                 prior = nothing, 
                 repulsion_restraint = false, 
@@ -67,7 +69,9 @@ function acefit!(model::ACE1Model, raw_data;
          data_point;
          energy_key = energy_key, 
          force_key=force_key, 
-         virial_key = virial_key, 
+         virial_key = virial_key,
+         pae_key = pae_key,
+         mask_key = mask_key,
          weights = weights, 
          v_ref = model.Vref
       )
@@ -105,6 +109,8 @@ function acefit!(model::ACE1Model, raw_data;
       energy_key= Symbol(energy_key),
       force_key = Symbol(force_key),
       virial_key= Symbol(virial_key),
+      pae_key   = Symbol(pae_key),
+      mask_key = Symbol(mask_key),
       energy_ref= model.Vref,
       kwargs... 
    )
@@ -140,7 +146,9 @@ function _apply_weight(
    data::JuLIP.Atoms;
    energy_key = nothing, 
    force_key = nothing, 
-   virial_key = nothing, 
+   virial_key = nothing,
+   pae_key = nothing,
+   mask_key = nothing,
    weights = nothing, 
    v_ref = nothing,
    kwargs...
@@ -150,6 +158,8 @@ function _apply_weight(
       energy_key = energy_key,
       force_key  = force_key,
       virial_key = virial_key,
+      pae_key    = pae_key,
+      mask_key   = mask_key,
       weights    = weights,
       v_ref      = v_ref,
    )
@@ -186,12 +196,15 @@ _dispatch_to_assebly(data, basis; kwargs...) = ACEfit.assemble(data, basis; kwar
 function linear_errors(raw_data::AbstractArray{<:JuLIP.Atoms}, model::ACE1Model; 
                        energy_key = "energy", 
                        force_key = "force", 
-                       virial_key = "virial", 
+                       virial_key = "virial",
+                       pae_key = nothing,
+                       mask_key = nothing,
                        weights = default_weights(), 
                        verbose = true )
    Vref = model.Vref                       
    data = [ AtomsData(at; energy_key = energy_key, force_key=force_key, 
-                          virial_key = virial_key, weights = weights, 
+                          virial_key = virial_key, pae_key=pae_key, mask_key=mask_key,
+                          weights = weights, 
                           v_ref = model.Vref) 
             for at in raw_data ] 
    return linear_errors(data, model.potential; verbose=verbose)
@@ -318,7 +331,9 @@ function assemble(raw_data::AbstractArray{JuLIP.Atoms}, model::ACE1Model;
                      weights = default_weights(),
                      energy_key = "energy", 
                      force_key = "force", 
-                     virial_key = "virial", 
+                     virial_key = "virial",
+                     pae_key = nothing,
+                     mask_key = nothing,
                      smoothness = 2, 
                      prior = nothing, 
                      repulsion_restraint = false, 
@@ -327,7 +342,7 @@ function assemble(raw_data::AbstractArray{JuLIP.Atoms}, model::ACE1Model;
                      weights_only = false)
 
    data = [ AtomsData(at; energy_key = energy_key, force_key=force_key, 
-                  virial_key = virial_key, weights = weights, 
+                  virial_key = virial_key, pae_key=pae_key, weights = weights, mask_key = mask_key,
                   v_ref = model.Vref)  for at in raw_data ]
 
    if repulsion_restraint 
