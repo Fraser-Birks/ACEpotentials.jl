@@ -96,7 +96,7 @@ function ACEfit.count_observations(d::AtomsData)
         sum(force_mask)*!isnothing(d.force_key) +
         6*!isnothing(d.virial_key) + 
         sum(pae_mask)*!isnothing(d.pae_key)
-    println(count)
+    #println(count)
     return count
 end
 
